@@ -43,17 +43,19 @@ namespace PerfView
             }
         }
 
-        public static IEnumerable<FlameBox> Calculate(CallTree callTree, double maxWidth, double maxHeight)
+        public static IEnumerable<FlameBox> Calculate(CallTree callTree, double maxWidth, double maxHeight, CallTreeNode startNode = null)
         {
-            double maxDepth = GetMaxDepth(callTree.Root);
-            double boxHeight = maxHeight / maxDepth;
-            double pixelsPerIncusiveSample = maxWidth / Math.Abs(callTree.Root.InclusiveMetric);
+            var rootNode = startNode ?? callTree.Root;
 
-            var rootBox = new FlameBox(callTree.Root, maxWidth, boxHeight, 0, maxHeight - boxHeight);
+            double maxDepth = GetMaxDepth(rootNode);
+            double boxHeight = maxHeight / Math.Max(1, maxDepth);
+            double pixelsPerIncusiveSample = maxWidth / Math.Max(1, Math.Abs(rootNode.InclusiveMetric));
+
+            var rootBox = new FlameBox(rootNode, maxWidth, boxHeight, 0, maxHeight - boxHeight);
             yield return rootBox;
 
             var nodesToVisit = new Queue<FlamePair>();
-            nodesToVisit.Enqueue(new FlamePair(rootBox, callTree.Root));
+            nodesToVisit.Enqueue(new FlamePair(rootBox, rootNode));
 
             while (nodesToVisit.Count > 0)
             {

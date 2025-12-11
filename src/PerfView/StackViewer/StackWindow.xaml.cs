@@ -375,6 +375,13 @@ namespace PerfView
                     var oldCallTree = m_callTree;
                     m_callTree = newCallTree;
 
+                    // Resolve pending flame graph root override from drill-into
+                    if (m_pendingFlameGraphRootId.HasValue)
+                    {
+                        m_flameGraphRootOverride = FindNodeById(m_callTree.Root, m_pendingFlameGraphRootId.Value);
+                        m_pendingFlameGraphRootId = null;
+                    }
+
                     // Gather current sorting information
                     var sortDescriptions = ByNameDataGrid.Grid.Items.SortDescriptions.ToArray();
                     var sortDirections = ByNameDataGrid.Grid.Columns.Select(c => c.SortDirection).ToArray();
@@ -514,14 +521,31 @@ namespace PerfView
         }
 
         /// <summary>
-        /// Update causes the gridview's to be recalculated based on the current stack source filter parameters. 
+        /// Update causes the gridview's to be recalculated based on the current stack source filter parameters.
         /// </summary>
         public void Update()
         {
             if (m_stackSource != null)
             {
-                SetStackSource(m_stackSource);  //  This forces a recomputation of the calltree.  
+                SetStackSource(m_stackSource);  //  This forces a recomputation of the calltree.
             }
+        }
+
+        /// <summary>
+        /// Helper to find a CallTreeNode by its frame ID in the built call tree.
+        /// </summary>
+        private static CallTreeNode FindNodeById(CallTreeNode root, StackSourceFrameIndex id)
+        {
+            var q = new Queue<CallTreeNode>();
+            q.Enqueue(root);
+            while (q.Count > 0)
+            {
+                var n = q.Dequeue();
+                if (n.ID == id) return n;
+                if (n.Callees != null)
+                    foreach (var c in n.Callees) q.Enqueue(c);
+            }
+            return root; // fallback
         }
 
         public CallTree CallTree => m_callTree;
@@ -1202,6 +1226,18 @@ namespace PerfView
             var newStackWindow = new StackWindow(this, this);
             newStackWindow.ExcludeRegExTextBox.Text = "";
             newStackWindow.IncludeRegExTextBox.Text = "";
+
+            // Capture the selected frame's ID to re-root the flame graph
+            var selectedNodes = GetSelectedNodes();
+            if (selectedNodes.Count == 1)
+            {
+                var selected = selectedNodes[0];
+                if (selected.ID != StackSourceFrameIndex.Invalid)
+                {
+                    newStackWindow.m_pendingFlameGraphRootId = selected.ID;
+                }
+            }
+
             newStackWindow.Show();
             newStackWindow.SetStackSource(drillIntoSamples);
         }
@@ -2723,9 +2759,10 @@ namespace PerfView
 
         private void RedrawFlameGraph()
         {
+            var fgRoot = m_flameGraphRootOverride ?? CallTree.Root;
             FlameGraphCanvas.Draw(
                   CallTree.Root.HasChildren
-                      ? FlameGraph.Calculate(CallTree, FlameGraphCanvas.ActualWidth, FlameGraphCanvas.ActualHeight)
+                      ? FlameGraph.Calculate(CallTree, FlameGraphCanvas.ActualWidth, FlameGraphCanvas.ActualHeight, fgRoot)
                       : Enumerable.Empty<FlameGraph.FlameBox>());
 
             m_RedrawFlameGraphWhenItBecomesVisible = false;
@@ -3874,6 +3911,8 @@ namespace PerfView
 
         private StackSource m_stackSource;
         internal CallTree m_callTree;
+        private CallTreeNode m_flameGraphRootOverride;
+        private StackSourceFrameIndex? m_pendingFlameGraphRootId;
 
         // Keep track of the parameters we have already seeen. 
         private List<FilterParams> m_history;
