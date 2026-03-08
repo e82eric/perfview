@@ -14,6 +14,11 @@ public sealed class ObjectGraph
     public int RootId { get; }
     public IReadOnlyList<ObjectNode> Nodes { get; }
     public IReadOnlyList<TypeInfo> Types { get; }
+    public int NodeIndexLimit => Nodes.Count;
+    public int TypeIndexLimit => Types.Count;
+
+    public ObjectNode GetNode(int nodeId) => Nodes[nodeId];
+    public TypeInfo GetType(int typeId) => Types[typeId];
 }
 
 public sealed class ObjectNode
@@ -29,8 +34,10 @@ public sealed class ObjectNode
     }
 
     public int Id { get; }
+    public int Index => Id;
     public ulong Address { get; }
     public int TypeId { get; }
+    public int TypeIndex => TypeId;
     public int Size { get; }
     public List<int> Children { get; }
     public List<int> Parents { get; }
@@ -48,6 +55,7 @@ public sealed class TypeInfo
     }
 
     public int Id { get; }
+    public int Index => Id;
     public string Name { get; }
     public string FullName { get; }
     public string ModuleName { get; }
@@ -90,6 +98,7 @@ public sealed class TypeSummary
     }
 
     public int Id { get; }
+    public int Index => Id;
     public string Name { get; }
     public string FullName { get; }
     public string ModuleName { get; }
