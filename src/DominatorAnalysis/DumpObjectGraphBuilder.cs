@@ -23,16 +23,16 @@ public static class DumpObjectGraphBuilder
         using DataTarget dataTarget = OpenDump(dumpPath);
         ClrRuntime[] runtimes = CreateRuntimes(dataTarget, log);
 
-        var nodes = new List<ObjectNode>();
-        var types = new List<TypeInfo>();
+        var scannedNodes = new List<ObjectNode>();
         var addressToNodeId = new Dictionary<ulong, int>(1_000_000);
-        var typeIdsByKey = new Dictionary<TypeKey, int>();
-        var typeIdsByClrType = new Dictionary<ClrType, int>();
+        var scannedTypeIdsByKey = new Dictionary<TypeKey, int>();
+        var scannedTypeIdsByClrType = new Dictionary<ClrType, int>();
+        var scannedTypes = new List<TypeInfo>();
         var stopwatch = Stopwatch.StartNew();
 
-        int rootTypeId = GetOrCreateSyntheticTypeId("[GC Roots]", typeIdsByKey, types);
-        int rootId = nodes.Count;
-        nodes.Add(new ObjectNode(rootId, 0, rootTypeId, 0));
+        int rootTypeId = GetOrCreateSyntheticTypeId("[GC Roots]", scannedTypeIdsByKey, scannedTypes);
+        int rootId = scannedNodes.Count;
+        scannedNodes.Add(new ObjectNode(rootId, 0, rootTypeId, 0));
 
         log.WriteLine("{0,5:n1}s: Starting object scan", stopwatch.Elapsed.TotalSeconds);
         long objectCount = 0;
@@ -46,12 +46,10 @@ public static class DumpObjectGraphBuilder
                     continue;
                 }
 
-                int typeId = GetOrCreateTypeId(obj.Type, typeIdsByClrType, typeIdsByKey, types);
-                int nodeId = nodes.Count;
+                int typeId = GetOrCreateTypeId(obj.Type, scannedTypeIdsByClrType, scannedTypeIdsByKey, scannedTypes);
+                int nodeId = scannedNodes.Count;
                 addressToNodeId[obj.Address] = nodeId;
-                nodes.Add(new ObjectNode(nodeId, obj.Address, typeId, checked((int)obj.Size)));
-                types[typeId].ExclusiveBytes += checked((long)obj.Size);
-                types[typeId].ExclusiveCount++;
+                scannedNodes.Add(new ObjectNode(nodeId, obj.Address, typeId, checked((int)obj.Size)));
                 objectCount++;
                 totalObjectBytes += checked((long)obj.Size);
                 if ((objectCount % 1_000_000) == 0)
@@ -61,7 +59,7 @@ public static class DumpObjectGraphBuilder
                         stopwatch.Elapsed.TotalSeconds,
                         objectCount,
                         totalObjectBytes / 1_000_000.0,
-                        types.Count);
+                        scannedTypes.Count);
                 }
             }
         }
@@ -71,72 +69,30 @@ public static class DumpObjectGraphBuilder
             stopwatch.Elapsed.TotalSeconds,
             objectCount,
             totalObjectBytes / 1_000_000.0,
-            types.Count);
-
-        int[] childCounts = new int[nodes.Count];
-        int[] parentCounts = new int[nodes.Count];
-        var uniqueChildren = new HashSet<int>();
-        log.WriteLine("{0,5:n1}s: Starting reference scan", stopwatch.Elapsed.TotalSeconds);
-        long edgeCount = 0;
-        long sourceObjectCount = 0;
-        foreach (ClrSegment segment in runtimes.SelectMany(runtime => runtime.Heap.Segments).OrderBy(segment => segment.Start))
-        {
-            foreach (ClrObject obj in segment.EnumerateObjects())
-            {
-                if (!addressToNodeId.TryGetValue(obj.Address, out int nodeId))
-                {
-                    continue;
-                }
-
-                uniqueChildren.Clear();
-                foreach (ulong childAddress in obj.EnumerateReferenceAddresses(carefully: true, considerDependantHandles: true))
-                {
-                    if (!addressToNodeId.TryGetValue(childAddress, out int childId) || !uniqueChildren.Add(childId))
-                    {
-                        continue;
-                    }
-
-                    childCounts[nodeId]++;
-                    parentCounts[childId]++;
-                    edgeCount++;
-                }
-
-                sourceObjectCount++;
-                if ((sourceObjectCount % 500_000) == 0)
-                {
-                    log.WriteLine(
-                        "{0,5:n1}s: Scanned references for {1:n0} objects, edges {2:n0}",
-                        stopwatch.Elapsed.TotalSeconds,
-                        sourceObjectCount,
-                        edgeCount);
-                }
-            }
-        }
-
-        log.WriteLine(
-            "{0,5:n1}s: Finished reference scan. EdgeCount={1:n0}",
-            stopwatch.Elapsed.TotalSeconds,
-            edgeCount);
+            scannedTypes.Count);
 
         log.WriteLine("{0,5:n1}s: Adding synthetic GC root edges", stopwatch.Elapsed.TotalSeconds);
         int[] rootChildren = CollectRootChildren(runtimes, addressToNodeId, log);
-        childCounts[rootId] += rootChildren.Length;
-        for (int i = 0; i < rootChildren.Length; i++)
-        {
-            parentCounts[rootChildren[i]]++;
-        }
+        log.WriteLine("{0,5:n1}s: Starting reachable reference scan", stopwatch.Elapsed.TotalSeconds);
+        ReachableGraphCounts reachable = CountReachableGraph(runtimes, scannedNodes, addressToNodeId, rootId, rootChildren, log, stopwatch);
+        log.WriteLine(
+            "{0,5:n1}s: Reachable graph counted. ReachableNodes={1:n0} EdgeCount={2:n0}",
+            stopwatch.Elapsed.TotalSeconds,
+            reachable.ReachableNodeCount,
+            reachable.EdgeCount);
 
-        int[] children = AllocateEdgeStorage(nodes, childCounts, isChildStorage: true);
-        int[] parents = AllocateEdgeStorage(nodes, parentCounts, isChildStorage: false);
-        int[] nextParent = FillReferenceEdges(runtimes, nodes, addressToNodeId, children, parents);
-        FillRootEdges(rootId, rootChildren, nodes, children, parents, nextParent);
+        log.WriteLine("{0,5:n1}s: Compacting reachable graph", stopwatch.Elapsed.TotalSeconds);
+        CompactGraph compact = CompactReachableGraph(scannedNodes, scannedTypes, rootId, reachable);
+        int[] children = AllocateEdgeStorage(compact.Nodes, compact.ChildCounts, isChildStorage: true);
+        int[] parents = AllocateEdgeStorage(compact.Nodes, compact.ParentCounts, isChildStorage: false);
+        FillReachableEdges(runtimes, scannedNodes, compact, addressToNodeId, rootId, rootChildren, children, parents);
         log.WriteLine(
             "{0,5:n1}s: Graph ready. NodeCount={1:n0} EdgeCount={2:n0}",
             stopwatch.Elapsed.TotalSeconds,
-            nodes.Count,
-            edgeCount + rootChildren.Length);
+            compact.Nodes.Count,
+            reachable.EdgeCount);
 
-        return new ObjectGraph(rootId, nodes, types, children, parents);
+        return new ObjectGraph(compact.RootId, compact.Nodes, compact.Types, children, parents);
     }
 
     private static int[] CollectRootChildren(
@@ -225,19 +181,36 @@ public static class DumpObjectGraphBuilder
         return new int[total];
     }
 
-    private static int[] FillReferenceEdges(
+    private static void FillReachableEdges(
         ClrRuntime[] runtimes,
-        List<ObjectNode> nodes,
+        List<ObjectNode> scannedNodes,
+        CompactGraph compact,
         Dictionary<ulong, int> addressToNodeId,
+        int scannedRootId,
+        int[] scannedRootChildren,
         int[] children,
         int[] parents)
     {
-        int[] nextChild = new int[nodes.Count];
-        int[] nextParent = new int[nodes.Count];
-        for (int i = 0; i < nodes.Count; i++)
+        int[] nextChild = new int[compact.Nodes.Count];
+        int[] nextParent = new int[compact.Nodes.Count];
+        for (int i = 0; i < compact.Nodes.Count; i++)
         {
-            nextChild[i] = nodes[i].ChildStart;
-            nextParent[i] = nodes[i].ParentStart;
+            nextChild[i] = compact.Nodes[i].ChildStart;
+            nextParent[i] = compact.Nodes[i].ParentStart;
+        }
+
+        int compactRootId = compact.RootId;
+        for (int i = 0; i < scannedRootChildren.Length; i++)
+        {
+            int scannedChildId = scannedRootChildren[i];
+            int compactChildId = compact.OldToNew[scannedChildId];
+            if (compactChildId < 0)
+            {
+                continue;
+            }
+
+            children[nextChild[compactRootId]++] = compactChildId;
+            parents[nextParent[compactChildId]++] = compactRootId;
         }
 
         var uniqueChildren = new HashSet<int>();
@@ -245,7 +218,13 @@ public static class DumpObjectGraphBuilder
         {
             foreach (ClrObject obj in segment.EnumerateObjects())
             {
-                if (!addressToNodeId.TryGetValue(obj.Address, out int nodeId))
+                if (!addressToNodeId.TryGetValue(obj.Address, out int scannedNodeId))
+                {
+                    continue;
+                }
+
+                int compactNodeId = compact.OldToNew[scannedNodeId];
+                if (compactNodeId < 0 || scannedNodeId == scannedRootId)
                 {
                     continue;
                 }
@@ -253,29 +232,190 @@ public static class DumpObjectGraphBuilder
                 uniqueChildren.Clear();
                 foreach (ulong childAddress in obj.EnumerateReferenceAddresses(carefully: true, considerDependantHandles: true))
                 {
-                    if (!addressToNodeId.TryGetValue(childAddress, out int childId) || !uniqueChildren.Add(childId))
+                    if (!addressToNodeId.TryGetValue(childAddress, out int scannedChildId) || !uniqueChildren.Add(scannedChildId))
                     {
                         continue;
                     }
 
-                    children[nextChild[nodeId]++] = childId;
-                    parents[nextParent[childId]++] = nodeId;
+                    int compactChildId = compact.OldToNew[scannedChildId];
+                    if (compactChildId < 0)
+                    {
+                        continue;
+                    }
+
+                    children[nextChild[compactNodeId]++] = compactChildId;
+                    parents[nextParent[compactChildId]++] = compactNodeId;
                 }
             }
         }
-
-        return nextParent;
     }
 
-    private static void FillRootEdges(int rootId, int[] rootChildren, List<ObjectNode> nodes, int[] children, int[] parents, int[] nextParent)
+    private static ReachableGraphCounts CountReachableGraph(
+        ClrRuntime[] runtimes,
+        List<ObjectNode> scannedNodes,
+        Dictionary<ulong, int> addressToNodeId,
+        int rootId,
+        int[] rootChildren,
+        TextWriter log,
+        Stopwatch stopwatch)
     {
-        int nextChild = nodes[rootId].ChildStart;
+        var reachable = new bool[scannedNodes.Count];
+        var childCounts = new int[scannedNodes.Count];
+        var parentCounts = new int[scannedNodes.Count];
+        var queue = new Queue<int>();
+        var uniqueChildren = new HashSet<int>();
+        long edgeCount = 0;
+        long scannedReachableObjects = 0;
+
+        reachable[rootId] = true;
+        childCounts[rootId] = rootChildren.Length;
         for (int i = 0; i < rootChildren.Length; i++)
         {
             int childId = rootChildren[i];
-            children[nextChild++] = childId;
-            parents[nextParent[childId]++] = rootId;
+            parentCounts[childId]++;
+            edgeCount++;
+            if (!reachable[childId])
+            {
+                reachable[childId] = true;
+                queue.Enqueue(childId);
+            }
         }
+
+        while (queue.Count > 0)
+        {
+            int scannedNodeId = queue.Dequeue();
+            scannedReachableObjects++;
+            ObjectNode scannedNode = scannedNodes[scannedNodeId];
+            ClrObject obj = GetObject(runtimes, scannedNode.Address);
+            if (!obj.IsValid)
+            {
+                continue;
+            }
+
+            uniqueChildren.Clear();
+            foreach (ulong childAddress in obj.EnumerateReferenceAddresses(carefully: true, considerDependantHandles: true))
+            {
+                if (!addressToNodeId.TryGetValue(childAddress, out int scannedChildId) || !uniqueChildren.Add(scannedChildId))
+                {
+                    continue;
+                }
+
+                childCounts[scannedNodeId]++;
+                parentCounts[scannedChildId]++;
+                edgeCount++;
+                if (!reachable[scannedChildId])
+                {
+                    reachable[scannedChildId] = true;
+                    queue.Enqueue(scannedChildId);
+                }
+            }
+
+            if ((scannedReachableObjects % 500_000) == 0)
+            {
+                log.WriteLine(
+                    "{0,5:n1}s: Counted reachable refs for {1:n0} objects, edges {2:n0}",
+                    stopwatch.Elapsed.TotalSeconds,
+                    scannedReachableObjects,
+                    edgeCount);
+            }
+        }
+
+        int reachableNodeCount = 0;
+        for (int i = 0; i < reachable.Length; i++)
+        {
+            if (reachable[i])
+            {
+                reachableNodeCount++;
+            }
+        }
+
+        return new ReachableGraphCounts(reachable, childCounts, parentCounts, reachableNodeCount, edgeCount);
+    }
+
+    private static CompactGraph CompactReachableGraph(
+        List<ObjectNode> scannedNodes,
+        List<TypeInfo> scannedTypes,
+        int scannedRootId,
+        ReachableGraphCounts reachable)
+    {
+        var newTypeIdsByOld = new int[scannedTypes.Count];
+        for (int i = 0; i < newTypeIdsByOld.Length; i++)
+        {
+            newTypeIdsByOld[i] = -1;
+        }
+
+        var oldToNew = new int[scannedNodes.Count];
+        for (int i = 0; i < oldToNew.Length; i++)
+        {
+            oldToNew[i] = -1;
+        }
+
+        var types = new List<TypeInfo>();
+        var nodes = new List<ObjectNode>(reachable.ReachableNodeCount);
+        var childCounts = new int[reachable.ReachableNodeCount];
+        var parentCounts = new int[reachable.ReachableNodeCount];
+
+        for (int oldNodeId = 0; oldNodeId < scannedNodes.Count; oldNodeId++)
+        {
+            if (!reachable.Reachable[oldNodeId])
+            {
+                continue;
+            }
+
+            ObjectNode oldNode = scannedNodes[oldNodeId];
+            int newTypeId = GetOrCreateCompactedTypeId(oldNode.TypeId, scannedTypes, newTypeIdsByOld, types);
+            int newNodeId = nodes.Count;
+            oldToNew[oldNodeId] = newNodeId;
+            nodes.Add(new ObjectNode(newNodeId, oldNode.Address, newTypeId, oldNode.Size));
+            childCounts[newNodeId] = reachable.ChildCounts[oldNodeId];
+            parentCounts[newNodeId] = reachable.ParentCounts[oldNodeId];
+            types[newTypeId].ExclusiveBytes += oldNode.Size;
+            if (oldNodeId != scannedRootId)
+            {
+                types[newTypeId].ExclusiveCount++;
+            }
+        }
+
+        return new CompactGraph(oldToNew[scannedRootId], oldToNew, nodes, types, childCounts, parentCounts);
+    }
+
+    private static int GetOrCreateCompactedTypeId(int oldTypeId, List<TypeInfo> scannedTypes, int[] newTypeIdsByOld, List<TypeInfo> types)
+    {
+        int newTypeId = newTypeIdsByOld[oldTypeId];
+        if (newTypeId >= 0)
+        {
+            return newTypeId;
+        }
+
+        TypeInfo oldType = scannedTypes[oldTypeId];
+        newTypeId = types.Count;
+        newTypeIdsByOld[oldTypeId] = newTypeId;
+        types.Add(new TypeInfo(newTypeId, oldType.Name, oldType.FullName, oldType.ModuleName, oldType.IsSynthetic));
+        return newTypeId;
+    }
+
+    private static ClrObject GetObject(ClrRuntime[] runtimes, ulong address)
+    {
+        if (address == 0)
+        {
+            return default;
+        }
+
+        if (runtimes.Length == 1)
+        {
+            return runtimes[0].Heap.GetObject(address);
+        }
+
+        foreach (ClrRuntime runtime in runtimes)
+        {
+            ClrObject obj = runtime.Heap.GetObject(address);
+            if (obj.IsValid)
+            {
+                return obj;
+            }
+        }
+
+        return default;
     }
 
     private static int GetOrCreateTypeId(
@@ -398,5 +538,43 @@ public static class DumpObjectGraphBuilder
                 return hash;
             }
         }
+    }
+
+    private sealed class ReachableGraphCounts
+    {
+        public ReachableGraphCounts(bool[] reachable, int[] childCounts, int[] parentCounts, int reachableNodeCount, long edgeCount)
+        {
+            Reachable = reachable;
+            ChildCounts = childCounts;
+            ParentCounts = parentCounts;
+            ReachableNodeCount = reachableNodeCount;
+            EdgeCount = edgeCount;
+        }
+
+        public bool[] Reachable { get; }
+        public int[] ChildCounts { get; }
+        public int[] ParentCounts { get; }
+        public int ReachableNodeCount { get; }
+        public long EdgeCount { get; }
+    }
+
+    private sealed class CompactGraph
+    {
+        public CompactGraph(int rootId, int[] oldToNew, List<ObjectNode> nodes, List<TypeInfo> types, int[] childCounts, int[] parentCounts)
+        {
+            RootId = rootId;
+            OldToNew = oldToNew;
+            Nodes = nodes;
+            Types = types;
+            ChildCounts = childCounts;
+            ParentCounts = parentCounts;
+        }
+
+        public int RootId { get; }
+        public int[] OldToNew { get; }
+        public List<ObjectNode> Nodes { get; }
+        public List<TypeInfo> Types { get; }
+        public int[] ChildCounts { get; }
+        public int[] ParentCounts { get; }
     }
 }
