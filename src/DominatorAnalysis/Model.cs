@@ -1,24 +1,40 @@
+using System;
 using System.Collections.Generic;
 
 namespace Microsoft.Diagnostics.DominatorAnalysis;
 
 public sealed class ObjectGraph
 {
-    internal ObjectGraph(int rootId, List<ObjectNode> nodes, List<TypeInfo> types)
+    internal ObjectGraph(int rootId, List<ObjectNode> nodes, List<TypeInfo> types, int[] children, int[] parents)
     {
         RootId = rootId;
         Nodes = nodes;
         Types = types;
+        Children = children;
+        Parents = parents;
     }
 
     public int RootId { get; }
     public IReadOnlyList<ObjectNode> Nodes { get; }
     public IReadOnlyList<TypeInfo> Types { get; }
+    public int[] Children { get; }
+    public int[] Parents { get; }
     public int NodeIndexLimit => Nodes.Count;
     public int TypeIndexLimit => Types.Count;
 
     public ObjectNode GetNode(int nodeId) => Nodes[nodeId];
     public TypeInfo GetType(int typeId) => Types[typeId];
+    public ArraySegment<int> GetChildren(int nodeId)
+    {
+        ObjectNode node = Nodes[nodeId];
+        return new ArraySegment<int>(Children, node.ChildStart, node.ChildCount);
+    }
+
+    public ArraySegment<int> GetParents(int nodeId)
+    {
+        ObjectNode node = Nodes[nodeId];
+        return new ArraySegment<int>(Parents, node.ParentStart, node.ParentCount);
+    }
 }
 
 public sealed class ObjectNode
@@ -29,8 +45,6 @@ public sealed class ObjectNode
         Address = address;
         TypeId = typeId;
         Size = size;
-        Children = new List<int>();
-        Parents = new List<int>();
     }
 
     public int Id { get; }
@@ -39,8 +53,10 @@ public sealed class ObjectNode
     public int TypeId { get; }
     public int TypeIndex => TypeId;
     public int Size { get; }
-    public List<int> Children { get; }
-    public List<int> Parents { get; }
+    public int ChildStart { get; internal set; }
+    public int ChildCount { get; internal set; }
+    public int ParentStart { get; internal set; }
+    public int ParentCount { get; internal set; }
 }
 
 public sealed class TypeInfo

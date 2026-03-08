@@ -73,6 +73,8 @@ public static class DumpObjectGraphBuilder
             totalObjectBytes / 1_000_000.0,
             types.Count);
 
+        int[] childCounts = new int[nodes.Count];
+        int[] parentCounts = new int[nodes.Count];
         var uniqueChildren = new HashSet<int>();
         log.WriteLine("{0,5:n1}s: Starting reference scan", stopwatch.Elapsed.TotalSeconds);
         long edgeCount = 0;
@@ -94,8 +96,8 @@ public static class DumpObjectGraphBuilder
                         continue;
                     }
 
-                    nodes[nodeId].Children.Add(childId);
-                    nodes[childId].Parents.Add(nodeId);
+                    childCounts[nodeId]++;
+                    parentCounts[childId]++;
                     edgeCount++;
                 }
 
@@ -117,21 +119,28 @@ public static class DumpObjectGraphBuilder
             edgeCount);
 
         log.WriteLine("{0,5:n1}s: Adding synthetic GC root edges", stopwatch.Elapsed.TotalSeconds);
-        AddRootEdges(dataTarget, runtimes, rootId, nodes, addressToNodeId, log);
+        int[] rootChildren = CollectRootChildren(runtimes, addressToNodeId, log);
+        childCounts[rootId] += rootChildren.Length;
+        for (int i = 0; i < rootChildren.Length; i++)
+        {
+            parentCounts[rootChildren[i]]++;
+        }
+
+        int[] children = AllocateEdgeStorage(nodes, childCounts, isChildStorage: true);
+        int[] parents = AllocateEdgeStorage(nodes, parentCounts, isChildStorage: false);
+        int[] nextParent = FillReferenceEdges(runtimes, nodes, addressToNodeId, children, parents);
+        FillRootEdges(rootId, rootChildren, nodes, children, parents, nextParent);
         log.WriteLine(
             "{0,5:n1}s: Graph ready. NodeCount={1:n0} EdgeCount={2:n0}",
             stopwatch.Elapsed.TotalSeconds,
             nodes.Count,
-            edgeCount + nodes[rootId].Children.Count);
+            edgeCount + rootChildren.Length);
 
-        return new ObjectGraph(rootId, nodes, types);
+        return new ObjectGraph(rootId, nodes, types, children, parents);
     }
 
-    private static void AddRootEdges(
-        DataTarget dataTarget,
+    private static int[] CollectRootChildren(
         ClrRuntime[] runtimes,
-        int rootId,
-        List<ObjectNode> nodes,
         Dictionary<ulong, int> addressToNodeId,
         TextWriter log)
     {
@@ -154,7 +163,7 @@ public static class DumpObjectGraphBuilder
                         foreach (ClrAppDomain domain in runtime.AppDomains)
                         {
                             ClrObject obj = field.ReadObject(domain);
-                            AddRootEdge(rootId, obj.Address, nodes, addressToNodeId, rootedNodes);
+                            AddRootEdge(obj.Address, addressToNodeId, rootedNodes);
                         }
                     }
                 }
@@ -167,7 +176,7 @@ public static class DumpObjectGraphBuilder
                     continue;
                 }
 
-                AddRootEdge(rootId, root.Object.Address, nodes, addressToNodeId, rootedNodes);
+                AddRootEdge(root.Object.Address, addressToNodeId, rootedNodes);
             }
         }
         catch (Exception ex) when (!(ex is OutOfMemoryException))
@@ -175,22 +184,98 @@ public static class DumpObjectGraphBuilder
             log.WriteLine("[ERROR while processing roots: {0}]", ex.Message);
             log.WriteLine("Continuing with partial root information.");
         }
+
+        int[] result = new int[rootedNodes.Count];
+        rootedNodes.CopyTo(result);
+        return result;
     }
 
     private static void AddRootEdge(
-        int rootId,
         ulong address,
-        List<ObjectNode> nodes,
         Dictionary<ulong, int> addressToNodeId,
         HashSet<int> rootedNodes)
     {
-        if (address == 0 || !addressToNodeId.TryGetValue(address, out int nodeId) || !rootedNodes.Add(nodeId))
+        if (address == 0 || !addressToNodeId.TryGetValue(address, out int nodeId))
         {
             return;
         }
 
-        nodes[rootId].Children.Add(nodeId);
-        nodes[nodeId].Parents.Add(rootId);
+        rootedNodes.Add(nodeId);
+    }
+
+    private static int[] AllocateEdgeStorage(List<ObjectNode> nodes, int[] counts, bool isChildStorage)
+    {
+        int total = 0;
+        for (int i = 0; i < nodes.Count; i++)
+        {
+            if (isChildStorage)
+            {
+                nodes[i].ChildStart = total;
+                nodes[i].ChildCount = counts[i];
+            }
+            else
+            {
+                nodes[i].ParentStart = total;
+                nodes[i].ParentCount = counts[i];
+            }
+
+            total += counts[i];
+        }
+
+        return new int[total];
+    }
+
+    private static int[] FillReferenceEdges(
+        ClrRuntime[] runtimes,
+        List<ObjectNode> nodes,
+        Dictionary<ulong, int> addressToNodeId,
+        int[] children,
+        int[] parents)
+    {
+        int[] nextChild = new int[nodes.Count];
+        int[] nextParent = new int[nodes.Count];
+        for (int i = 0; i < nodes.Count; i++)
+        {
+            nextChild[i] = nodes[i].ChildStart;
+            nextParent[i] = nodes[i].ParentStart;
+        }
+
+        var uniqueChildren = new HashSet<int>();
+        foreach (ClrSegment segment in runtimes.SelectMany(runtime => runtime.Heap.Segments).OrderBy(segment => segment.Start))
+        {
+            foreach (ClrObject obj in segment.EnumerateObjects())
+            {
+                if (!addressToNodeId.TryGetValue(obj.Address, out int nodeId))
+                {
+                    continue;
+                }
+
+                uniqueChildren.Clear();
+                foreach (ulong childAddress in obj.EnumerateReferenceAddresses(carefully: true, considerDependantHandles: true))
+                {
+                    if (!addressToNodeId.TryGetValue(childAddress, out int childId) || !uniqueChildren.Add(childId))
+                    {
+                        continue;
+                    }
+
+                    children[nextChild[nodeId]++] = childId;
+                    parents[nextParent[childId]++] = nodeId;
+                }
+            }
+        }
+
+        return nextParent;
+    }
+
+    private static void FillRootEdges(int rootId, int[] rootChildren, List<ObjectNode> nodes, int[] children, int[] parents, int[] nextParent)
+    {
+        int nextChild = nodes[rootId].ChildStart;
+        for (int i = 0; i < rootChildren.Length; i++)
+        {
+            int childId = rootChildren[i];
+            children[nextChild++] = childId;
+            parents[nextParent[childId]++] = rootId;
+        }
     }
 
     private static int GetOrCreateTypeId(

@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 
 namespace Microsoft.Diagnostics.DominatorAnalysis;
@@ -21,9 +22,10 @@ public static class LengauerTarjanDominator
         {
             int w = i;
             int wNodeId = nodeByDfs[w];
-            for (int predecessorIndex = 0; predecessorIndex < graph.Nodes[wNodeId].Parents.Count; predecessorIndex++)
+            ArraySegment<int> predecessors = graph.GetParents(wNodeId);
+            for (int predecessorIndex = 0; predecessorIndex < predecessors.Count; predecessorIndex++)
             {
-                int predecessorNodeId = graph.Nodes[wNodeId].Parents[predecessorIndex];
+                int predecessorNodeId = predecessors.Array[predecessors.Offset + predecessorIndex];
                 int predecessorDfs = dfsNumberByNode[predecessorNodeId];
                 if (predecessorDfs == 0)
                 {
@@ -133,10 +135,10 @@ public static class LengauerTarjanDominator
                 label[dfsCount] = dfsCount;
             }
 
-            List<int> children = graph.Nodes[state.NodeId].Children;
+            ArraySegment<int> children = graph.GetChildren(state.NodeId);
             if (state.NextChildIndex < children.Count)
             {
-                int childNodeId = children[state.NextChildIndex];
+                int childNodeId = children.Array[children.Offset + state.NextChildIndex];
                 stack.Push(new TraversalState(state.NodeId, state.ParentDfs, state.NextChildIndex + 1));
                 if (dfsNumberByNode[childNodeId] == 0)
                 {
