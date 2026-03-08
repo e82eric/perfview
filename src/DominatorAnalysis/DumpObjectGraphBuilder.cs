@@ -3,6 +3,7 @@ using Azure.Identity;
 using Microsoft.Diagnostics.Runtime;
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.IO;
 using System.Linq;
 
@@ -26,11 +27,15 @@ public static class DumpObjectGraphBuilder
         var types = new List<TypeInfo>();
         var addressToNodeId = new Dictionary<ulong, int>(1_000_000);
         var typeIdsByKey = new Dictionary<TypeKey, int>();
+        var stopwatch = Stopwatch.StartNew();
 
         int rootTypeId = GetOrCreateSyntheticTypeId("[GC Roots]", typeIdsByKey, types);
         int rootId = nodes.Count;
         nodes.Add(new ObjectNode(rootId, 0, rootTypeId, 0));
 
+        log.WriteLine("{0,5:n1}s: Starting object graph build", stopwatch.Elapsed.TotalSeconds);
+        long objectCount = 0;
+        long objectBytes = 0;
         foreach (ClrSegment segment in runtimes.SelectMany(runtime => runtime.Heap.Segments).OrderBy(segment => segment.Start))
         {
             foreach (ClrObject obj in segment.EnumerateObjects())
@@ -46,10 +51,31 @@ public static class DumpObjectGraphBuilder
                 nodes.Add(new ObjectNode(nodeId, obj.Address, typeId, checked((int)obj.Size)));
                 types[typeId].ExclusiveBytes += checked((long)obj.Size);
                 types[typeId].ExclusiveCount++;
+                objectCount++;
+                objectBytes += checked((long)obj.Size);
+                if ((objectCount % 1_000_000) == 0)
+                {
+                    log.WriteLine(
+                        "{0,5:n1}s: Scanned {1:n0} objects, size {2:n1} MB, types {3:n0}",
+                        stopwatch.Elapsed.TotalSeconds,
+                        objectCount,
+                        objectBytes / 1_000_000.0,
+                        types.Count);
+                }
             }
         }
 
+        log.WriteLine(
+            "{0,5:n1}s: Finished object scan. Objects={1:n0} Size={2:n1} MB Types={3:n0}",
+            stopwatch.Elapsed.TotalSeconds,
+            objectCount,
+            objectBytes / 1_000_000.0,
+            types.Count);
+
         var uniqueChildren = new HashSet<int>();
+        long edgeCount = 0;
+        long sourceCount = 0;
+        log.WriteLine("{0,5:n1}s: Starting reference scan", stopwatch.Elapsed.TotalSeconds);
         foreach (ClrSegment segment in runtimes.SelectMany(runtime => runtime.Heap.Segments).OrderBy(segment => segment.Start))
         {
             foreach (ClrObject obj in segment.EnumerateObjects())
@@ -69,11 +95,33 @@ public static class DumpObjectGraphBuilder
 
                     nodes[nodeId].Children.Add(childId);
                     nodes[childId].Parents.Add(nodeId);
+                    edgeCount++;
+                }
+
+                sourceCount++;
+                if ((sourceCount % 500_000) == 0)
+                {
+                    log.WriteLine(
+                        "{0,5:n1}s: Scanned references for {1:n0} objects, edges {2:n0}",
+                        stopwatch.Elapsed.TotalSeconds,
+                        sourceCount,
+                        edgeCount);
                 }
             }
         }
 
+        log.WriteLine(
+            "{0,5:n1}s: Finished reference scan. EdgeCount={1:n0}",
+            stopwatch.Elapsed.TotalSeconds,
+            edgeCount);
+
+        log.WriteLine("{0,5:n1}s: Adding synthetic root edges", stopwatch.Elapsed.TotalSeconds);
         AddRootEdges(dataTarget, runtimes, rootId, nodes, addressToNodeId, log);
+        log.WriteLine(
+            "{0,5:n1}s: Object graph ready. NodeCount={1:n0} EdgeCount={2:n0}",
+            stopwatch.Elapsed.TotalSeconds,
+            nodes.Count,
+            edgeCount + nodes[rootId].Children.Count);
 
         return new ObjectGraph(rootId, nodes, types);
     }
