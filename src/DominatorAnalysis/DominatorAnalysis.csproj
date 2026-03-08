@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFrameworks>netstandard2.0</TargetFrameworks>
+    <RootNamespace>Microsoft.Diagnostics.DominatorAnalysis</RootNamespace>
+    <AssemblyName>Microsoft.Diagnostics.DominatorAnalysis</AssemblyName>
+    <PublishRepositoryUrl>true</PublishRepositoryUrl>
+
+    <Company>Microsoft</Company>
+    <Description>Dominator-based retained-size analysis for .NET dumps</Description>
+    <Copyright>Copyright © Microsoft 2010</Copyright>
+    <Version>$(MemoryGraphVersion)</Version>
+  </PropertyGroup>
+
+  <PropertyGroup>
+    <HighEntropyVA>true</HighEntropyVA>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Azure.Identity" />
+    <PackageReference Include="Microsoft.Diagnostics.Runtime" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.SourceLink.GitHub" PrivateAssets="All" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <FilesToSign Include="$(TargetPath)">
+      <Authenticode>Microsoft400</Authenticode>
+      <StrongName>StrongName</StrongName>
+    </FilesToSign>
+    <PackageReference Include="MicroBuild.Core" />
+  </ItemGroup>
+
+  <PropertyGroup>
+    <SignAssembly Condition="'$(SIGNING_BUILD)'!= ''">true</SignAssembly>
+    <DelaySign>true</DelaySign>
+    <AssemblyOriginatorKeyFile>..\MSFT.snk</AssemblyOriginatorKeyFile>
+  </PropertyGroup>
+</Project>

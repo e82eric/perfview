@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <RootNamespace>ReferredFromDump</RootNamespace>
+    <AssemblyName>ReferredFromDump</AssemblyName>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.SourceLink.GitHub" PrivateAssets="All" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\DominatorAnalysis\DominatorAnalysis.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Compile Remove="GCHeapDumper.cs" />
+    <Compile Remove="PriorityQueue.cs" />
+    <Compile Remove="HeapDump\**\*.cs" />
+    <Compile Remove="HeapDumpCommon\**\*.cs" />
+    <Compile Remove="PerfView\PerfViewLogger.cs" />
+    <Compile Remove="PerfView\memory\MemoryGraphStackSource.cs" />
+  </ItemGroup>
+
+</Project>

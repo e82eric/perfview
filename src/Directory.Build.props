@@ -3,6 +3,7 @@
 
   <PropertyGroup>
     <EnableDefaultNoneItems>False</EnableDefaultNoneItems>
+    <DefaultItemExcludes>$(DefaultItemExcludes);**/obj-rfd/**</DefaultItemExcludes>
   </PropertyGroup>
 
   <PropertyGroup>
